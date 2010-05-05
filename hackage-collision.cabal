@@ -1,0 +1,40 @@
+Name:                hackage-collision
+Version:             0.1
+Synopsis:            Finds name collisions on Hackage
+-- Description:         
+Homepage:            http://github.com/ezyang/hackage-collision
+License:             BSD3
+License-file:        LICENSE
+Author:              Edward Z. Yang
+Maintainer:          ezyang@mit.edu
+Copyright:           (C) Edward Z. Yang 2010
+Category:            Distribution
+Build-type:          Simple
+
+-- Extra files to be distributed with the package, such as examples or
+-- a README.
+-- Extra-source-files:  
+
+-- Constraint on the version of Cabal needed to build this package.
+Cabal-version:       >=1.2
+
+Executable:          hackage-collision
+Main-is:             HackageCollision.hs
+Build-depends:       base,
+                     Cabal >= 1.8.0 && < 1.9,
+                     haskell-src >= 1.0.1 && < 1.1,
+                     directory >= 1.0.0 && < 1.1,
+                     filepath >= 1.1.0 && < 1.2,
+                     cmdargs >= 0.1 && < 0.2,
+                     haskell98,
+                     utility-ht >= 0.0.5 && < 0.1,
+                     containers >= 0.2.0 && < 0.3,
+                     mtl >= 1.1.0 && < 1.2,
+                     MaybeT >= 0.1.2 && < 0.2
+
+  -- Modules not exported by this package.
+  -- Other-modules:       
+
+  -- Extra tools (e.g. alex, hsc2hs, ...) needed to build the source.
+  -- Build-tools:         
+
