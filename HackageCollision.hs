@@ -1,70 +1,58 @@
 {-# LANGUAGE DeriveDataTypeable #-}
 
-import Foreign
+import Prelude hiding (readFile)
 
+import Control.Applicative
 import Control.Monad
 import Control.Monad.Maybe
-import Control.Monad.Trans
 import Control.Monad.Writer
 import Control.Monad.State
-import Control.Applicative
 
 import Data.Map (Map)
-import qualified Data.Map as Map
 import Data.Set (Set)
-import qualified Data.Set as Set
 import Data.Maybe
 import Data.List
-import qualified Data.List.Key as Key
 import Data.Char
 
-import System
+import qualified Data.Map as Map
+import qualified Data.Set as Set
+import qualified Data.List.Key as Key
+
 import System.Console.CmdArgs
 import System.FilePath
 import System.Directory
-import System.IO
-import System.IO.Unsafe
+import System.IO.Strict
 
 import Language.Haskell.Syntax
-import Language.Haskell.Parser
+import qualified Language.Haskell.Parser as Haskell
 
 import Distribution.ModuleName (ModuleName, toFilePath)
 import Distribution.PackageDescription
-import Distribution.PackageDescription.Parse hiding (ParseOk)
+import qualified Distribution.PackageDescription.Parse as DistParse
 import Distribution.Verbosity
 
 data HackageCollision = HackageCollision
     { dir :: FilePath
     } deriving (Data, Typeable, Show, Eq)
 
+hackageCollision :: Mode HackageCollision
 hackageCollision = mode HackageCollision
     { dir = def &= args & typ "DIR" & argPos 0
     }
 
+modes :: [Mode HackageCollision]
 modes = [hackageCollision]
 
-readFile' f = do
-  h <- openFile f ReadMode
-  s <- hFileSize h
-  fp <- mallocForeignPtrBytes (fromIntegral s)
-  len <- withForeignPtr fp $ \buf -> hGetBuf h buf (fromIntegral s)
-  lazySlurp fp 0 len
+parseFile :: FilePath -> IO (Haskell.ParseResult HsModule)
+parseFile filename = Haskell.parseModule <$> readFile filename
 
-lazySlurp :: ForeignPtr Word8 -> Int -> Int -> IO String
-lazySlurp fp ix len
-  | ix == len = return []
-  | otherwise = do
-     c <- withForeignPtr fp $ \p -> peekElemOff p ix
-     cs <- unsafeInterleaveIO (lazySlurp fp (ix+1) len)
-     return (chr (fromIntegral c) : cs)
-
-parseFile filename = readFile' filename >>= return . parseModule
-
-parseResultToMaybe (ParseOk a) = Just a
+parseResultToMaybe (Haskell.ParseOk a) = Just a
 parseResultToMaybe _ = Nothing
 
+getVisibleDirectoryContents :: FilePath -> IO [String]
 getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryContents d
 
+main :: IO ()
 main = do
     args <- cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
     let directory = dir args
@@ -82,8 +70,7 @@ getPublicNamesFromPackage directory name = do
     paths <- getPublicModulePaths directory name
     parses <- mapM ((`catch` const (return Nothing)) . fmap Just . parseFile) paths
     return $ (`execState` Map.empty) . mapM_ getPublicNames
-                                     . catMaybes
-                                     . map parseResultToMaybe
+                                     . mapMaybe parseResultToMaybe
                                      . catMaybes
                                      $ parses
 
@@ -98,7 +85,7 @@ getPublicNames (HsModule _ m (Just exports) _ decls) = mapM_ handleExport export
           handleExport _ = return ()
           handleCName (HsVarName n) = add n
           handleCName (HsConName n) = add n
-          add n = modify (\s -> Map.insertWith Set.union n (Set.singleton m) s)
+          add n = modify (Map.insertWith Set.union n (Set.singleton m))
 getPublicNames _ = return ()
 
 getPublicModulePaths :: FilePath -> String -> IO [FilePath]
@@ -107,7 +94,7 @@ getPublicModulePaths dir name = do
     version <- head <$> getVisibleDirectoryContents subdir
     let realdir = subdir </> version </> name ++ "-" ++ version
         package = realdir </> name ++ ".cabal"
-    gd <- readPackageDescription silent package
+    gd <- DistParse.readPackageDescription silent package
     return . map ((realdir </>) . (++ ".hs") . toFilePath)
            . libraryToModules
            $ condLibraries gd ++ uncondLibraries gd
@@ -115,9 +102,11 @@ getPublicModulePaths dir name = do
 libraryToModules :: [Library] -> [ModuleName]
 libraryToModules = concatMap exposedModules
 
+condLibraries :: GenericPackageDescription -> [Library]
 condLibraries gd = maybe [] (execWriter . handler) (condLibrary gd)
     where handler (CondNode a _ ps) = tell [a] >> mapM_ handler' ps
           handler' (_, n, Just m) = handler n >> handler m
           handler' (_, n, Nothing) = handler n
 
+uncondLibraries :: GenericPackageDescription -> [Library]
 uncondLibraries gd = maybe [] return . library $ packageDescription gd
