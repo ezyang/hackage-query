@@ -3,8 +3,6 @@
 import Prelude hiding (readFile)
 
 import Control.Applicative
-import Control.Monad
-import Control.Monad.Maybe
 import Control.Monad.Writer
 import Control.Monad.State
 
@@ -46,6 +44,7 @@ modes = [hackageCollision]
 parseFile :: FilePath -> IO (Haskell.ParseResult HsModule)
 parseFile filename = Haskell.parseModule <$> readFile filename
 
+parseResultToMaybe :: Haskell.ParseResult a -> Maybe a
 parseResultToMaybe (Haskell.ParseOk a) = Just a
 parseResultToMaybe _ = Nothing
 
@@ -54,8 +53,7 @@ getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryCo
 
 main :: IO ()
 main = do
-    args <- cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
-    let directory = dir args
+    directory <- dir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
     names <- getVisibleDirectoryContents directory
     bags <- mapM (getPublicNamesFromPackage directory) names
     let bag = Map.unionsWith Set.union bags
@@ -75,7 +73,7 @@ getPublicNamesFromPackage directory name = do
                                      $ parses
 
 getPublicNames :: HsModule -> State (Map HsName (Set Module)) ()
-getPublicNames (HsModule _ m (Just exports) _ decls) = mapM_ handleExport exports
+getPublicNames (HsModule _ m (Just exports) _ _) = mapM_ handleExport exports
     where handleExport (HsEVar (UnQual n)) = add n
           handleExport (HsEAbs (UnQual n)) = add n
           handleExport (HsEThingAll (UnQual n)) = add n -- XXX also lookup the rest
@@ -89,12 +87,12 @@ getPublicNames (HsModule _ m (Just exports) _ decls) = mapM_ handleExport export
 getPublicNames _ = return ()
 
 getPublicModulePaths :: FilePath -> String -> IO [FilePath]
-getPublicModulePaths dir name = do
-    let subdir = dir </> name
+getPublicModulePaths d name = do
+    let subdir = d </> name
     version <- head <$> getVisibleDirectoryContents subdir
     let realdir = subdir </> version </> name ++ "-" ++ version
-        package = realdir </> name ++ ".cabal"
-    gd <- DistParse.readPackageDescription silent package
+        pkg = realdir </> name ++ ".cabal"
+    gd <- DistParse.readPackageDescription silent pkg
     return . map ((realdir </>) . (++ ".hs") . toFilePath)
            . libraryToModules
            $ condLibraries gd ++ uncondLibraries gd
