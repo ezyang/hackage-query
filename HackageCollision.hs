@@ -30,12 +30,14 @@ import qualified Distribution.PackageDescription.Parse as DistParse
 import Distribution.Verbosity
 
 data HackageCollision = HackageCollision
-    { dir :: FilePath
+    { argDir :: FilePath
     } deriving (Data, Typeable, Show, Eq)
+
+type SetMap a b = Map a (Set b)
 
 hackageCollision :: Mode HackageCollision
 hackageCollision = mode HackageCollision
-    { dir = def &= args & typ "DIR" & argPos 0
+    { argDir = def &= args & typ "DIR" & argPos 0
     }
 
 modes :: [Mode HackageCollision]
@@ -53,17 +55,19 @@ getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryCo
 
 main :: IO ()
 main = do
-    directory <- dir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
+    directory <- argDir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
     names <- getVisibleDirectoryContents directory
-    bags <- mapM (getPublicNamesFromPackage directory) names
-    let bag = Map.unionsWith Set.union bags
-        results = Key.sort (negate . Set.size . snd) $ Map.toList bag
+    bag <- Map.unionsWith Set.union <$> mapM (getPublicNamesFromPackage directory) names
+    render . Key.sort (negate . Set.size . snd) $ Map.toList bag
+
+render :: [(HsName, Set Module)] -> IO ()
+render results = do
     mapM_ renderResult results
     mapM_ renderModules $ take 50 results
-        where renderResult (v, ms) = putStr (show (Set.size ms)) >> putStr " " >> print v
+        where renderResult  (v, ms) = putStr (show (Set.size ms)) >> putStr " " >> print v
               renderModules (v, ms) = putStr (show v) >> putStr " " >> print ms
 
-getPublicNamesFromPackage :: FilePath -> String -> IO (Map HsName (Set Module))
+getPublicNamesFromPackage :: FilePath -> String -> IO (SetMap HsName Module)
 getPublicNamesFromPackage directory name = do
     paths <- getPublicModulePaths directory name
     parses <- mapM ((`catch` const (return Nothing)) . fmap Just . parseFile) paths
@@ -94,17 +98,13 @@ getPublicModulePaths d name = do
         pkg = realdir </> name ++ ".cabal"
     gd <- DistParse.readPackageDescription silent pkg
     return . map ((realdir </>) . (++ ".hs") . toFilePath)
-           . libraryToModules
-           $ condLibraries gd ++ uncondLibraries gd
+           . concatMap exposedModules
+           $ packageLibraries gd
 
-libraryToModules :: [Library] -> [ModuleName]
-libraryToModules = concatMap exposedModules
-
-condLibraries :: GenericPackageDescription -> [Library]
-condLibraries gd = maybe [] (execWriter . handler) (condLibrary gd)
-    where handler (CondNode a _ ps) = tell [a] >> mapM_ handler' ps
-          handler' (_, n, Just m) = handler n >> handler m
-          handler' (_, n, Nothing) = handler n
-
-uncondLibraries :: GenericPackageDescription -> [Library]
-uncondLibraries gd = maybe [] return . library $ packageDescription gd
+packageLibraries :: GenericPackageDescription -> [Library]
+packageLibraries gd = condLibraries gd ++ uncondLibraries gd
+    where condLibraries gd = maybe [] (execWriter . handleCondNode) (condLibrary gd)
+            where handleCondNode (CondNode a _ ps) = tell [a] >> mapM_ handleTuple ps
+                  handleTuple (_, n, Just m) = handleCondNode n >> handleCondNode m
+                  handleTuple (_, n, Nothing) = handleCondNode n
+          uncondLibraries gd = maybe [] return . library $ packageDescription gd
