@@ -20,15 +20,15 @@ Cabal-version:       >=1.2
 
 Executable hackage-collision
     Main-is:             HackageCollision.hs
-    Build-depends:       base,
+    Build-depends:       base >= 4.2.0 && < 4.3,
                          Cabal >= 1.8.0 && < 1.9,
-                         haskell-src >= 1.0.1 && < 1.1,
+                         haskell-src-exts >= 1.9.0 && < 1.10,
                          directory >= 1.0.0 && < 1.1,
                          filepath >= 1.1.0 && < 1.2,
                          cmdargs >= 0.1 && < 0.2,
                          haskell98,
                          utility-ht >= 0.0.5 && < 0.1,
-                         containers >= 0.2.0 && < 0.3,
+                         containers >= 0.2.0 && < 0.4,
                          mtl >= 1.1.0 && < 1.2,
                          MaybeT >= 0.1.2 && < 0.2,
                          strict >= 0.3.2 && < 0.4
