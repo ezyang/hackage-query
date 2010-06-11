@@ -35,17 +35,13 @@ import Distribution.Simple.Utils
 --------------
 -- Driver code
 
-data HackageCollision = HackageCollision
-    { argDir :: FilePath
-    } deriving (Data, Typeable, Show, Eq)
+data HackageQuery = Collisions { argDir :: FilePath } deriving (Data, Typeable, Show, Eq)
 
-hackageCollision :: Mode HackageCollision
-hackageCollision = mode HackageCollision
-    { argDir = def &= args & typ "DIR" & argPos 0
-    }
+collisions :: Mode HackageQuery
+collisions = mode Collisions { argDir = def &= args & typ "DIR" & argPos 0 }
 
-modes :: [Mode HackageCollision]
-modes = [hackageCollision]
+modes :: [Mode HackageQuery]
+modes = [collisions]
 
 main :: IO ()
 main = do
@@ -124,13 +120,13 @@ forModules packageDir pkgd f = do
         sourceDirs  = packageSourceDirs  packageDir pkgd
     filePairs <- findModuleFiles (packageDir:sourceDirs) [".hs"] moduleNames
     let files = map (uncurry (</>)) filePairs
-    modules <- readModuleFiles files
+    modules <- parseModuleFiles files
     forM modules f
 
 -- | Parses a list of module files, dropping module files that fail to
 -- parse
-readModuleFiles :: [FilePath] -> IO [Module]
-readModuleFiles paths = do
+parseModuleFiles :: [FilePath] -> IO [Module]
+parseModuleFiles paths = do
     parses <- mapM ((`catch` errHandler) . fmap Just . parseFile) paths
     return . mapMaybe parseResultToMaybe . catMaybes $ parses
     where errHandler :: IOException -> IO (Maybe a)

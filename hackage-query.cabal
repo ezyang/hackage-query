@@ -1,6 +1,6 @@
-Name:                hackage-collision
+Name:                hackage-query
 Version:             0.1
-Synopsis:            Finds name collisions on Hackage
+Synopsis:            Query for interesting information about Hackage
 -- Description:         
 Homepage:            http://github.com/ezyang/hackage-collision
 License:             BSD3
@@ -18,8 +18,8 @@ Build-type:          Simple
 -- Constraint on the version of Cabal needed to build this package.
 Cabal-version:       >=1.2
 
-Executable hackage-collision
-    Main-is:             HackageCollision.hs
+Executable hackage-query
+    Main-is:             hackage-query.hs
     Build-depends:       base >= 4.2.0 && < 4.3,
                          Cabal >= 1.8.0 && < 1.9,
                          haskell-src-exts >= 1.9.0 && < 1.10,
