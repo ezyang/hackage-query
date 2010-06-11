@@ -29,6 +29,9 @@ import qualified Distribution.PackageDescription.Parse as DistParse
 import Distribution.Verbosity
 import Distribution.Simple.Utils
 
+--------------
+-- Driver code
+
 data HackageCollision = HackageCollision
     { argDir :: FilePath
     } deriving (Data, Typeable, Show, Eq)
@@ -41,7 +44,37 @@ hackageCollision = mode HackageCollision
 modes :: [Mode HackageCollision]
 modes = [hackageCollision]
 
--- | Strictly parses an hs file.
+main :: IO ()
+main = do
+    directory <- argDir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
+    names <- getVisibleDirectoryContents directory
+    bag <- mconcat <$> mapM (packagePublicModuleNames directory) names
+    render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
+
+render :: [(Name, Set ModuleName)] -> IO ()
+render results = do
+    mapM_ renderResult results
+    mapM_ renderModules $ take 50 results
+        where renderResult  (v, ms) = putStr . unwords $ [show (Set.size ms), show v]
+              renderModules (v, ms) = putStr . unwords $ [show v, show ms]
+
+--------------------
+-- Data declarations
+
+newtype SetMap k v = SetMap { unSetMap :: Map k (Set v) }
+
+instance (Ord k, Ord v) => Monoid (SetMap k v) where
+    mempty = SetMap Map.empty
+    mappend (SetMap a) (SetMap b) = SetMap $ Map.unionWith Set.union a b
+    mconcat = SetMap . Map.unionsWith Set.union . map unSetMap
+
+setMapSingleton :: (Ord k, Ord v) => k -> v -> SetMap k v
+setMapSingleton k v = SetMap $ Map.singleton k (Set.singleton v)
+
+---------------------
+-- Utility functions
+
+-- | Strictly parses a Haskell file with extensions.
 parseFile :: FilePath -> IO (Haskell.ParseResult Module)
 parseFile filename = tryParse utf8 `catch` ioConst (tryParse latin1)
     where
@@ -66,47 +99,26 @@ parseResultToMaybe _ = Nothing
 getVisibleDirectoryContents :: FilePath -> IO [String]
 getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryContents d
 
-main :: IO ()
-main = do
-    directory <- argDir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
-    names <- getVisibleDirectoryContents directory
-    bag <- mconcat <$> mapM (getPublicNamesFromPackage directory) names
-    render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
+---------------------------
+-- Actual manipulation code
 
-render :: [(Name, Set ModuleName)] -> IO ()
-render results = do
-    mapM_ renderResult results
-    mapM_ renderModules $ take 50 results
-        where renderResult  (v, ms) = putStr . unwords $ [show (Set.size ms), show v]
-              renderModules (v, ms) = putStr . unwords $ [show v, show ms]
-
-getPublicNamesFromPackage :: FilePath -> String -> IO (SetMap Name ModuleName)
-getPublicNamesFromPackage directory name = do
+packagePublicModuleNames :: FilePath -> String -> IO (SetMap Name ModuleName)
+packagePublicModuleNames directory name = do
     let
         errHandler :: IOException -> IO (Maybe a)
         errHandler e = do
             hPutStrLn stderr (show e) -- (directory ++ ":" ++ name ++ ". " ++ show e)
             return Nothing
-    paths <- getPublicModulePaths directory name
+    paths <- findPackagePublicModules directory name
     parses <- mapM ((`catch` errHandler) . fmap Just . parseFile) paths
     return . mconcat
-           . map getPublicNames
+           . map modulePublicIdentifiers
            . mapMaybe parseResultToMaybe
            . catMaybes
            $ parses
 
-newtype SetMap k v = SetMap { unSetMap :: Map k (Set v) }
-
-instance (Ord k, Ord v) => Monoid (SetMap k v) where
-    mempty = SetMap Map.empty
-    mappend (SetMap a) (SetMap b) = SetMap $ Map.unionWith Set.union a b
-    mconcat = SetMap . Map.unionsWith Set.union . map unSetMap
-
-setMapSingleton :: (Ord k, Ord v) => k -> v -> SetMap k v
-setMapSingleton k v = SetMap $ Map.singleton k (Set.singleton v)
-
-getPublicNames :: Module -> SetMap Name ModuleName
-getPublicNames (Module _ m _ _ (Just exports) _ _) = mconcat . map handleExport $ exports
+modulePublicIdentifiers :: Module -> SetMap Name ModuleName
+modulePublicIdentifiers (Module _ m _ _ (Just exports) _ _) = mconcat . map handleExport $ exports
     where handleExport x = case x of
             EVar (UnQual n) -> add n
             EAbs (UnQual n) -> add n
@@ -119,14 +131,14 @@ getPublicNames (Module _ m _ _ (Just exports) _ _) = mconcat . map handleExport 
             VarName n -> add n
             ConName n -> add n
           add n = setMapSingleton n m
-getPublicNames _ = mempty
+modulePublicIdentifiers _ = mempty
 
 -- ddarius : No.  I mean stick the local functions into a where clause,
 -- parameterize as necessary, and then rewrite the
 -- body in the four or five lines it will then be.
 
-getPublicModulePaths :: FilePath -> String -> IO [FilePath]
-getPublicModulePaths d name = do
+findPackagePublicModules :: FilePath -> String -> IO [FilePath]
+findPackagePublicModules d name = do
     -- Get the directory of the current version of the package
     let subdir = d </> name
     version <- head <$> getVisibleDirectoryContents subdir

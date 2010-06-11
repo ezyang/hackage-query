@@ -32,7 +32,7 @@ Executable hackage-collision
                          mtl >= 1.1.0 && < 1.2,
                          MaybeT >= 0.1.2 && < 0.2,
                          strict >= 0.3.2 && < 0.4
-    Ghc-options:         -Wall -Werror
+    Ghc-options:         -Wall
 
   -- Modules not exported by this package.
   -- Other-modules:       
