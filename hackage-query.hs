@@ -10,6 +10,7 @@ import Data.Map (Map)
 import Data.Set (Set)
 import Data.Maybe
 import Data.Foldable (foldMap)
+import Data.Traversable (for)
 
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -26,6 +27,7 @@ import qualified Language.Haskell.Exts.Syntax as Syntax
 import Language.Haskell.Exts (parseFileContents)
 import qualified Language.Haskell.Exts.Parser as Haskell
 
+import Distribution.Package
 import Distribution.PackageDescription
 import qualified Distribution.ModuleName as DistModule
 import qualified Distribution.PackageDescription.Parse as DistParse
@@ -35,32 +37,27 @@ import Distribution.Simple.Utils
 --------------
 -- Driver code
 
-data HackageQuery = Collisions { argDir :: FilePath } deriving (Data, Typeable, Show, Eq)
+data HackageQuery = Collisions { argDir :: FilePath }
+                  | Tools { argDir :: FilePath }
+    deriving (Data, Typeable, Show, Eq)
 
-collisions :: Mode HackageQuery
-collisions = mode Collisions { argDir = def &= args & typ "DIR" & argPos 0 }
+dirFlags = args & typ "HACKAGE-DIR" & argPos 0
 
 modes :: [Mode HackageQuery]
-modes = [collisions]
+modes = [collisions, tools]
 
 main :: IO ()
 main = do
-    directory <- argDir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
-    names <- getVisibleDirectoryContents directory
-    bag <- mconcat . concat <$> mapM (findIdentifiers directory) names
-    render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
-
-render :: [(Name, Set Syntax.ModuleName)] -> IO ()
-render results = do
-    mapM_ renderResult results
-    mapM_ renderModules $ take 50 results
-        where renderResult  (v, ms) = putStr . unwords $ [show (Set.size ms), show v]
-              renderModules (v, ms) = putStr . unwords $ [show v, show ms]
+    args <- cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
+    case args of
+        Collisions {} -> runCollisions args
+        Tools {} -> runTools args
 
 --------------------
 -- Data declarations
 
 newtype SetMap k v = SetMap { unSetMap :: Map k (Set v) }
+    deriving (Show)
 
 instance (Ord k, Ord v) => Monoid (SetMap k v) where
     mempty = SetMap Map.empty
@@ -101,6 +98,13 @@ getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryCo
 
 -------------------------------------
 -- Drilling into the Hackage database
+
+withPackages :: FilePath
+             -> (String -> FilePath -> GenericPackageDescription -> IO a)
+             -> IO [a]
+withPackages hackageDir f = do
+    packageNames <- getVisibleDirectoryContents hackageDir
+    mapM (\name -> withPackage hackageDir name (f name)) packageNames
 
 -- Runs an action with a description of the package
 withPackage :: FilePath -> String
@@ -170,8 +174,22 @@ packageLibraries pkgd = condLibraries ++ uncondLibraries
 packageModuleNames :: GenericPackageDescription -> [DistModule.ModuleName]
 packageModuleNames = concatMap exposedModules . packageLibraries
 
---------------------------
--- Looking for identifiers
+-------------
+-- Collisions
+
+collisions = mode Collisions { argDir = def &= dirFlags }
+          &= text "Search Hackage for identifier collisions"
+runCollisions args = do
+    let hackageDir = argDir args
+    packageNames <- getVisibleDirectoryContents hackageDir
+    bag <- mconcat . concat <$> mapM (findIdentifiers hackageDir) packageNames
+    render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
+    where render :: [(Name, Set Syntax.ModuleName)] -> IO ()
+          render results = do
+                mapM_ renderResult results
+                mapM_ renderModules $ take 50 results
+                    where renderResult  (v, ms) = putStr . unwords $ [show (Set.size ms), show v]
+                          renderModules (v, ms) = putStr . unwords $ [show v, show ms]
 
 -- | Grabs the public identifiers given a Hackage directory and a module name.
 
@@ -199,3 +217,35 @@ modulePublicIdentifiers (Module _ m _ _ (Just exports) _ _) = foldMap handleExpo
 -- should also case for an empty exports list, in which case all
 -- identifiers are exported
 modulePublicIdentifiers _ = mempty
+
+--------
+-- Tools
+
+tools = mode Tools { argDir = def &= dirFlags }
+          &= text "Search Hackage for build tool usage"
+runTools args = do
+    let hackageDir = argDir args
+    results <- withPackages hackageDir $ \packageName pkgDir pkgd -> do
+        let tools = packageBuildToolNames pkgd
+        return $ foldMap (\(PackageName tool) -> setMapSingleton tool packageName) tools
+    let bag = mconcat results
+        sortedResults = Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
+    forM_ sortedResults $ \(tool, packages) -> do
+        putStrLn $ tool ++ " (" ++ show (Set.size packages) ++ ")"
+        forM_ (Set.toList packages) $ \package ->
+            putStrLn $ "    " ++ package
+        putStrLn ""
+
+packageBuildToolNames :: GenericPackageDescription -> [PackageName]
+packageBuildToolNames pkgd = uncondTools ++ condLibraryTools
+    where uncondTools = flattenTools
+                      . allBuildInfo
+                      . packageDescription
+                      $ pkgd
+          condLibraryTools = flattenTools
+                           . maybe [] (execWriter . handleCondNode)
+                           $ (condLibrary pkgd)
+          handleCondNode (CondNode a _ ps) = tell [libBuildInfo a] >> mapM_ handleCondTuple ps
+          handleCondTuple (_, n, Just m) = handleCondNode n >> handleCondNode m
+          handleCondTuple (_, n, Nothing) = handleCondNode n
+          flattenTools = map (\(Dependency name _) -> name) . concatMap buildTools
