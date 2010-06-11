@@ -9,6 +9,7 @@ import Control.Monad.Writer
 import Data.Map (Map)
 import Data.Set (Set)
 import Data.Maybe
+import Data.Foldable (foldMap)
 
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -20,11 +21,13 @@ import System.Directory
 import System.IO.Strict
 import System.IO hiding (readFile, hGetContents)
 
-import Language.Haskell.Exts.Syntax
+import Language.Haskell.Exts.Syntax hiding (ModuleName)
+import qualified Language.Haskell.Exts.Syntax as Syntax
 import Language.Haskell.Exts (parseFileContents)
 import qualified Language.Haskell.Exts.Parser as Haskell
 
 import Distribution.PackageDescription
+import qualified Distribution.ModuleName as DistModule
 import qualified Distribution.PackageDescription.Parse as DistParse
 import Distribution.Verbosity
 import Distribution.Simple.Utils
@@ -48,10 +51,10 @@ main :: IO ()
 main = do
     directory <- argDir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
     names <- getVisibleDirectoryContents directory
-    bag <- mconcat <$> mapM (packagePublicModuleNames directory) names
+    bag <- mconcat <$> mapM (findIdentifiers directory) names
     render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
 
-render :: [(Name, Set ModuleName)] -> IO ()
+render :: [(Name, Set Syntax.ModuleName)] -> IO ()
 render results = do
     mapM_ renderResult results
     mapM_ renderModules $ take 50 results
@@ -102,22 +105,30 @@ getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryCo
 ---------------------------
 -- Actual manipulation code
 
-packagePublicModuleNames :: FilePath -> String -> IO (SetMap Name ModuleName)
-packagePublicModuleNames directory name = do
-    let
-        errHandler :: IOException -> IO (Maybe a)
-        errHandler e = do
-            hPutStrLn stderr (show e) -- (directory ++ ":" ++ name ++ ". " ++ show e)
-            return Nothing
-    paths <- findPackagePublicModules directory name
-    parses <- mapM ((`catch` errHandler) . fmap Just . parseFile) paths
-    return . mconcat
-           . map modulePublicIdentifiers
-           . mapMaybe parseResultToMaybe
-           . catMaybes
-           $ parses
+-- | Grabs the public identifiers given a Hackage directory and a module name.
+findIdentifiers :: FilePath -> String -> IO (SetMap Name Syntax.ModuleName)
+findIdentifiers hackageDir packageName = do
+    packageDir <- findLatestPackageDir hackageDir packageName
+    pkgd <- readPackageDir packageDir packageName
+    let moduleNames = packageModuleNames pkgd
+        sourceDirs  = packageSourceDirs  packageDir pkgd
+    files <- liftM (map snd) $ findModuleFiles (packageDir:sourceDirs) [".hs"] moduleNames
+    modules <- readModuleFiles files
+    return $ foldMap modulePublicIdentifiers modules
 
-modulePublicIdentifiers :: Module -> SetMap Name ModuleName
+-- | Parses a list of module files, dropping module files that fail to
+-- parse
+readModuleFiles :: [FilePath] -> IO [Module]
+readModuleFiles paths = do
+    parses <- mapM ((`catch` errHandler) . fmap Just . parseFile) paths
+    return . mapMaybe parseResultToMaybe . catMaybes $ parses
+    where errHandler :: IOException -> IO (Maybe a)
+          errHandler e = do
+                hPutStrLn stderr (show e) -- (directory ++ ":" ++ name ++ ". " ++ show e)
+                return Nothing
+
+-- | Extracts public identifiers from a module's abstract syntax tree.
+modulePublicIdentifiers :: Module -> SetMap Name Syntax.ModuleName
 modulePublicIdentifiers (Module _ m _ _ (Just exports) _ _) = mconcat . map handleExport $ exports
     where handleExport x = case x of
             EVar (UnQual n) -> add n
@@ -131,41 +142,34 @@ modulePublicIdentifiers (Module _ m _ _ (Just exports) _ _) = mconcat . map hand
             VarName n -> add n
             ConName n -> add n
           add n = setMapSingleton n m
+-- should also case for an empty exports list, in which case all
+-- identifiers are exported
 modulePublicIdentifiers _ = mempty
 
--- ddarius : No.  I mean stick the local functions into a where clause,
--- parameterize as necessary, and then rewrite the
--- body in the four or five lines it will then be.
+-- | Determines the directory corresponding to the package directory of
+-- the latest version of 'packageName' in an extracted Hackage archive
+-- located in 'hackageDir'.
+findLatestPackageDir :: FilePath -> String -> IO FilePath
+findLatestPackageDir hackageDir packageName = do
+    let versionsDir = hackageDir </> packageName
+    version <- head <$> getVisibleDirectoryContents versionsDir
+    return $ versionsDir </> version </> packageName ++ "-" ++ version
 
-findPackagePublicModules :: FilePath -> String -> IO [FilePath]
-findPackagePublicModules d name = do
-    -- Get the directory of the current version of the package
-    let subdir = d </> name
-    version <- head <$> getVisibleDirectoryContents subdir
-    -- Figure out where the cabal file is
-    let realdir = subdir </> version </> name ++ "-" ++ version
-        pkg = realdir </> name ++ ".cabal"
-    -- Parse the cabal file
-    pkgd <- DistParse.readPackageDescription silent pkg
-    let
-        -- Figure out where source directories to look for hs files
-        buildPrefix = map (realdir </>)
-                    . concatMap hsSourceDirs
-                    . allBuildInfo
-                    . packageDescription
-                    $ pkgd
-        -- Grab all visible moudle names
-        moduleNames = concatMap exposedModules . packageLibraries $ pkgd
-        -- Figure out the source file location of a given modle name
-        findModuleName m = do
-            file <- findModuleFile (realdir : buildPrefix) [".hs"] m
-            return . Just $ realdir </> snd file
-        errHandler :: IOException -> IO (Maybe a)
-        errHandler _ = {-hPutStrLn stderr (show e) >> -}return Nothing
-    -- Run the kaboodle
-    maybeModulePaths <- mapM (\m -> findModuleName m `catch` errHandler) moduleNames
-    return . catMaybes $ maybeModulePaths
+-- | Reads the Cabal package file out of a package directory.
+readPackageDir :: FilePath -> String -> IO GenericPackageDescription
+readPackageDir packageDir packageName = do
+    let cabalFile = packageDir </> packageName ++ ".cabal"
+    DistParse.readPackageDescription silent cabalFile
 
+-- | Retrieves all of the source directories (where module hirearchies
+-- live) in a package.  Paths are prefixed by 'packageDir'.
+packageSourceDirs :: FilePath -> GenericPackageDescription -> [FilePath]
+packageSourceDirs packageDir = map (packageDir </>)
+                             . concatMap hsSourceDirs
+                             . allBuildInfo
+                             . packageDescription
+
+-- | Retrieves all of the exposed libraries from a package.
 packageLibraries :: GenericPackageDescription -> [Library]
 packageLibraries pkgd = condLibraries ++ uncondLibraries
     where condLibraries = maybe [] (execWriter . handleCondNode) (condLibrary pkgd)
@@ -173,3 +177,7 @@ packageLibraries pkgd = condLibraries ++ uncondLibraries
                   handleTuple (_, n, Just m) = handleCondNode n >> handleCondNode m
                   handleTuple (_, n, Nothing) = handleCondNode n
           uncondLibraries = maybe [] return . library $ packageDescription pkgd
+
+-- | Retrieves all of the exposed module names from a package.
+packageModuleNames :: GenericPackageDescription -> [DistModule.ModuleName]
+packageModuleNames = concatMap exposedModules . packageLibraries
