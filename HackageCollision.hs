@@ -5,7 +5,6 @@ import Prelude hiding (readFile, catch)
 import Control.Exception
 import Control.Applicative
 import Control.Monad.Writer
-import Control.Monad.State
 
 import Data.Map (Map)
 import Data.Set (Set)
@@ -33,8 +32,6 @@ import Distribution.Simple.Utils
 data HackageCollision = HackageCollision
     { argDir :: FilePath
     } deriving (Data, Typeable, Show, Eq)
-
-type SetMap a b = Map a (Set b)
 
 hackageCollision :: Mode HackageCollision
 hackageCollision = mode HackageCollision
@@ -73,8 +70,8 @@ main :: IO ()
 main = do
     directory <- argDir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
     names <- getVisibleDirectoryContents directory
-    bag <- Map.unionsWith Set.union <$> mapM (getPublicNamesFromPackage directory) names
-    render . Key.sort (negate . Set.size . snd) $ Map.toList bag
+    bag <- mconcat <$> mapM (getPublicNamesFromPackage directory) names
+    render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
 
 render :: [(Name, Set ModuleName)] -> IO ()
 render results = do
@@ -92,26 +89,37 @@ getPublicNamesFromPackage directory name = do
             return Nothing
     paths <- getPublicModulePaths directory name
     parses <- mapM ((`catch` errHandler) . fmap Just . parseFile) paths
-    return $ (`execState` Map.empty) . mapM_ getPublicNames
-                                     . mapMaybe parseResultToMaybe
-                                     . catMaybes
-                                     $ parses
+    return . mconcat
+           . map getPublicNames
+           . mapMaybe parseResultToMaybe
+           . catMaybes
+           $ parses
 
-getPublicNames :: Module -> State (Map Name (Set ModuleName)) ()
-getPublicNames (Module _ m _ _ (Just exports) _ _) = mapM_ handleExport exports
+newtype SetMap k v = SetMap { unSetMap :: Map k (Set v) }
+
+instance (Ord k, Ord v) => Monoid (SetMap k v) where
+    mempty = SetMap Map.empty
+    mappend (SetMap a) (SetMap b) = SetMap $ Map.unionWith Set.union a b
+    mconcat = SetMap . Map.unionsWith Set.union . map unSetMap
+
+setMapSingleton :: (Ord k, Ord v) => k -> v -> SetMap k v
+setMapSingleton k v = SetMap $ Map.singleton k (Set.singleton v)
+
+getPublicNames :: Module -> SetMap Name ModuleName
+getPublicNames (Module _ m _ _ (Just exports) _ _) = mconcat . map handleExport $ exports
     where handleExport x = case x of
             EVar (UnQual n) -> add n
             EAbs (UnQual n) -> add n
             EThingAll (UnQual n) -> add n -- XXX also lookup the rest
             -- XXX: Can a qualified export have unqualified insides? I
             -- don't think so...
-            EThingWith (UnQual n) cs -> add n >> mapM_ handleCName cs
-            _ -> return ()
+            EThingWith (UnQual n) cs -> add n `mappend` (mconcat . map handleCName) cs
+            _ -> mempty
           handleCName x = case x of
             VarName n -> add n
             ConName n -> add n
-          add n = modify (Map.insertWith Set.union n (Set.singleton m))
-getPublicNames _ = return ()
+          add n = setMapSingleton n m
+getPublicNames _ = mempty
 
 -- ddarius : No.  I mean stick the local functions into a where clause,
 -- parameterize as necessary, and then rewrite the
@@ -119,22 +127,30 @@ getPublicNames _ = return ()
 
 getPublicModulePaths :: FilePath -> String -> IO [FilePath]
 getPublicModulePaths d name = do
+    -- Get the directory of the current version of the package
     let subdir = d </> name
     version <- head <$> getVisibleDirectoryContents subdir
+    -- Figure out where the cabal file is
     let realdir = subdir </> version </> name ++ "-" ++ version
         pkg = realdir </> name ++ ".cabal"
+    -- Parse the cabal file
     pkgd <- DistParse.readPackageDescription silent pkg
-    let buildPrefix = map (realdir </>)
+    let
+        -- Figure out where source directories to look for hs files
+        buildPrefix = map (realdir </>)
                     . concatMap hsSourceDirs
                     . allBuildInfo
                     . packageDescription
                     $ pkgd
+        -- Grab all visible moudle names
         moduleNames = concatMap exposedModules . packageLibraries $ pkgd
+        -- Figure out the source file location of a given modle name
         findModuleName m = do
             file <- findModuleFile (realdir : buildPrefix) [".hs"] m
             return . Just $ realdir </> snd file
         errHandler :: IOException -> IO (Maybe a)
         errHandler _ = {-hPutStrLn stderr (show e) >> -}return Nothing
+    -- Run the kaboodle
     maybeModulePaths <- mapM (\m -> findModuleName m `catch` errHandler) moduleNames
     return . catMaybes $ maybeModulePaths
 
