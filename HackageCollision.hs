@@ -51,7 +51,7 @@ main :: IO ()
 main = do
     directory <- argDir <$> cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
     names <- getVisibleDirectoryContents directory
-    bag <- mconcat <$> mapM (findIdentifiers directory) names
+    bag <- mconcat . concat <$> mapM (findIdentifiers directory) names
     render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
 
 render :: [(Name, Set Syntax.ModuleName)] -> IO ()
@@ -99,22 +99,33 @@ parseResultToMaybe :: Haskell.ParseResult a -> Maybe a
 parseResultToMaybe (Haskell.ParseOk a) = Just a
 parseResultToMaybe _ = Nothing
 
+-- | Returns a list of visible file names in a directory.
 getVisibleDirectoryContents :: FilePath -> IO [String]
 getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryContents d
 
----------------------------
--- Actual manipulation code
+-------------------------------------
+-- Drilling into the Hackage database
 
--- | Grabs the public identifiers given a Hackage directory and a module name.
-findIdentifiers :: FilePath -> String -> IO (SetMap Name Syntax.ModuleName)
-findIdentifiers hackageDir packageName = do
+-- Runs an action with a description of the package
+withPackage :: FilePath -> String
+            -> (FilePath -> GenericPackageDescription -> IO a)
+            -> IO a
+withPackage hackageDir packageName f = do
     packageDir <- findLatestPackageDir hackageDir packageName
     pkgd <- readPackageDir packageDir packageName
+    f packageDir pkgd
+
+-- Runs an action for each visible module in a package.
+forModules :: FilePath -> GenericPackageDescription
+           -> (Module -> IO a)
+           -> IO [a]
+forModules packageDir pkgd f = do
     let moduleNames = packageModuleNames pkgd
         sourceDirs  = packageSourceDirs  packageDir pkgd
-    files <- liftM (map snd) $ findModuleFiles (packageDir:sourceDirs) [".hs"] moduleNames
+    filePairs <- findModuleFiles (packageDir:sourceDirs) [".hs"] moduleNames
+    let files = map (uncurry (</>)) filePairs
     modules <- readModuleFiles files
-    return $ foldMap modulePublicIdentifiers modules
+    forM modules f
 
 -- | Parses a list of module files, dropping module files that fail to
 -- parse
@@ -126,25 +137,6 @@ readModuleFiles paths = do
           errHandler e = do
                 hPutStrLn stderr (show e) -- (directory ++ ":" ++ name ++ ". " ++ show e)
                 return Nothing
-
--- | Extracts public identifiers from a module's abstract syntax tree.
-modulePublicIdentifiers :: Module -> SetMap Name Syntax.ModuleName
-modulePublicIdentifiers (Module _ m _ _ (Just exports) _ _) = mconcat . map handleExport $ exports
-    where handleExport x = case x of
-            EVar (UnQual n) -> add n
-            EAbs (UnQual n) -> add n
-            EThingAll (UnQual n) -> add n -- XXX also lookup the rest
-            -- XXX: Can a qualified export have unqualified insides? I
-            -- don't think so...
-            EThingWith (UnQual n) cs -> add n `mappend` (mconcat . map handleCName) cs
-            _ -> mempty
-          handleCName x = case x of
-            VarName n -> add n
-            ConName n -> add n
-          add n = setMapSingleton n m
--- should also case for an empty exports list, in which case all
--- identifiers are exported
-modulePublicIdentifiers _ = mempty
 
 -- | Determines the directory corresponding to the package directory of
 -- the latest version of 'packageName' in an extracted Hackage archive
@@ -181,3 +173,33 @@ packageLibraries pkgd = condLibraries ++ uncondLibraries
 -- | Retrieves all of the exposed module names from a package.
 packageModuleNames :: GenericPackageDescription -> [DistModule.ModuleName]
 packageModuleNames = concatMap exposedModules . packageLibraries
+
+--------------------------
+-- Looking for identifiers
+
+-- | Grabs the public identifiers given a Hackage directory and a module name.
+
+findIdentifiers :: FilePath -> String -> IO [SetMap Name Syntax.ModuleName]
+findIdentifiers hackageDir packageName =
+    withPackage hackageDir packageName $ \packageDir pkgd ->
+        forModules packageDir pkgd $ \m ->
+            return (modulePublicIdentifiers m)
+
+-- | Extracts public identifiers from a module's abstract syntax tree.
+modulePublicIdentifiers :: Module -> SetMap Name Syntax.ModuleName
+modulePublicIdentifiers (Module _ m _ _ (Just exports) _ _) = foldMap handleExport $ exports
+    where handleExport x = case x of
+            EVar (UnQual n) -> add n
+            EAbs (UnQual n) -> add n
+            EThingAll (UnQual n) -> add n -- XXX also lookup the rest
+            -- XXX: Can a qualified export have unqualified insides? I
+            -- don't think so...
+            EThingWith (UnQual n) cs -> add n `mappend` (foldMap handleCName) cs
+            _ -> mempty
+          handleCName x = case x of
+            VarName n -> add n
+            ConName n -> add n
+          add n = setMapSingleton n m
+-- should also case for an empty exports list, in which case all
+-- identifiers are exported
+modulePublicIdentifiers _ = mempty
