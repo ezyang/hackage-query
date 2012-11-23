@@ -11,6 +11,7 @@ import Data.Set (Set)
 import Data.Maybe
 import Data.Foldable (foldMap)
 import Data.Traversable (for)
+import Data.List
 
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -33,25 +34,28 @@ import qualified Distribution.ModuleName as DistModule
 import qualified Distribution.PackageDescription.Parse as DistParse
 import Distribution.Verbosity
 import Distribution.Simple.Utils
+import Distribution.Version
 
 --------------
 -- Driver code
 
 data HackageQuery = Collisions { argDir :: FilePath }
                   | Tools { argDir :: FilePath }
+                  | Dependencies { argDir :: FilePath }
     deriving (Data, Typeable, Show, Eq)
 
-dirFlags = args & typ "HACKAGE-DIR" & argPos 0
+dirFlags = args &= typ "HACKAGE-DIR" &= argPos 0
 
-modes :: [Mode HackageQuery]
-modes = [collisions, tools]
+mymodes :: HackageQuery
+mymodes = modes [collisions, tools, dependencies]
 
 main :: IO ()
 main = do
-    args <- cmdArgs "HackageCollision v0.1, (C) Edward Z. Yang 2010" modes
+    args <- cmdArgs mymodes
     case args of
         Collisions {} -> runCollisions args
         Tools {} -> runTools args
+        Dependencies {} -> runDependencies args
 
 --------------------
 -- Data declarations
@@ -122,7 +126,9 @@ forModules :: FilePath -> GenericPackageDescription
 forModules packageDir pkgd f = do
     let moduleNames = packageModuleNames pkgd
         sourceDirs  = packageSourceDirs  packageDir pkgd
-    filePairs <- findModuleFiles (packageDir:sourceDirs) [".hs"] moduleNames
+        errHandler :: SomeException -> IO [a]
+        errHandler _ = return []
+    filePairs <- findModuleFiles (packageDir:sourceDirs) [".hs"] moduleNames `catch` errHandler
     let files = map (uncurry (</>)) filePairs
     modules <- parseModuleFiles files
     forM modules f
@@ -141,11 +147,18 @@ parseModuleFiles paths = do
 -- | Determines the directory corresponding to the package directory of
 -- the latest version of 'packageName' in an extracted Hackage archive
 -- located in 'hackageDir'.
+-- XXX method is kind of skeevy
 findLatestPackageDir :: FilePath -> String -> IO FilePath
-findLatestPackageDir hackageDir packageName = do
+findLatestPackageDir hackageDir packageName = (head . reverse . sort) `fmap` findAllPackageDirs hackageDir packageName
+
+-- | Determines the directory corresponding to the package directory of
+-- the latest version of 'packageName' in an extracted Hackage archive
+-- located in 'hackageDir'.
+findAllPackageDirs :: FilePath -> String -> IO [FilePath]
+findAllPackageDirs hackageDir packageName = do
     let versionsDir = hackageDir </> packageName
-    version <- head <$> getVisibleDirectoryContents versionsDir
-    return $ versionsDir </> version </> packageName ++ "-" ++ version
+    versions <- getVisibleDirectoryContents versionsDir
+    return $ map (\v -> versionsDir </> v </> packageName ++ "-" ++ v) versions
 
 -- | Reads the Cabal package file out of a package directory.
 readPackageDir :: FilePath -> String -> IO GenericPackageDescription
@@ -177,8 +190,8 @@ packageModuleNames = concatMap exposedModules . packageLibraries
 -------------
 -- Collisions
 
-collisions = mode Collisions { argDir = def &= dirFlags }
-          &= text "Search Hackage for identifier collisions"
+collisions = Collisions { argDir = def &= dirFlags }
+          &= help "Search Hackage for identifier collisions"
 runCollisions args = do
     let hackageDir = argDir args
     packageNames <- getVisibleDirectoryContents hackageDir
@@ -186,10 +199,15 @@ runCollisions args = do
     render . Key.sort (negate . Set.size . snd) . Map.toList . unSetMap $ bag
     where render :: [(Name, Set Syntax.ModuleName)] -> IO ()
           render results = do
-                mapM_ renderResult results
-                mapM_ renderModules $ take 50 results
-                    where renderResult  (v, ms) = putStr . unwords $ [show (Set.size ms), show v]
-                          renderModules (v, ms) = putStr . unwords $ [show v, show ms]
+                let xs = filter isSymbol results
+                mapM_ renderResult xs
+                mapM_ renderModules xs
+                    where renderResult  (v, ms) = putStrLn (show (Set.size ms) ++ " " ++ unwrapName v)
+                          renderModules (v, ms) = putStrLn (show v ++ " " ++ show ms)
+          unwrapName (Syntax.Ident n) = n
+          unwrapName (Syntax.Symbol n) = n
+          isSymbol (Syntax.Symbol _, _) = True
+          isSymbol _ = False
 
 -- | Grabs the public identifiers given a Hackage directory and a module name.
 
@@ -197,7 +215,7 @@ findIdentifiers :: FilePath -> String -> IO [SetMap Name Syntax.ModuleName]
 findIdentifiers hackageDir packageName =
     withPackage hackageDir packageName $ \packageDir pkgd ->
         forModules packageDir pkgd $ \m ->
-            return (modulePublicIdentifiers m)
+            evaluate (modulePublicIdentifiers m)
 
 -- | Extracts public identifiers from a module's abstract syntax tree.
 modulePublicIdentifiers :: Module -> SetMap Name Syntax.ModuleName
@@ -221,8 +239,8 @@ modulePublicIdentifiers _ = mempty
 --------
 -- Tools
 
-tools = mode Tools { argDir = def &= dirFlags }
-          &= text "Search Hackage for build tool usage"
+tools = Tools { argDir = def &= dirFlags }
+          &= help "Search Hackage for build tool usage"
 runTools args = do
     let hackageDir = argDir args
     results <- withPackages hackageDir $ \packageName pkgDir pkgd -> do
@@ -249,3 +267,16 @@ packageBuildToolNames pkgd = uncondTools ++ condLibraryTools
           handleCondTuple (_, n, Just m) = handleCondNode n >> handleCondNode m
           handleCondTuple (_, n, Nothing) = handleCondNode n
           flattenTools = map (\(Dependency name _) -> name) . concatMap buildTools
+
+----------------
+-- Compatibility
+
+-- XXX watch out: you want easy to handle data first
+
+dependencies = Dependencies { argDir = def &= dirFlags }
+            &= help "Analyze per-version dependencies"
+runDependencies args = do
+    let hackageDir = argDir args
+    withPackages hackageDir $ \packageName pkgDir pkgd -> do
+        return ()
+    return ()
