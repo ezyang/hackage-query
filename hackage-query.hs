@@ -12,6 +12,7 @@ import Data.Maybe
 import Data.Foldable (foldMap)
 import Data.Traversable (for)
 import Data.List
+import Data.Version
 
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -53,9 +54,9 @@ main :: IO ()
 main = do
     args <- cmdArgs mymodes
     case args of
-        Collisions {} -> runCollisions args
-        Tools {} -> runTools args
-        Dependencies {} -> runDependencies args
+        Collisions {} -> runCollisions args >> return ()
+        Tools {} -> runTools args >> return ()
+        Dependencies {} -> runDependencies args >> return ()
 
 --------------------
 -- Data declarations
@@ -103,21 +104,34 @@ getVisibleDirectoryContents d = filter (`notElem` [".",".."]) <$> getDirectoryCo
 -------------------------------------
 -- Drilling into the Hackage database
 
-withPackages :: FilePath
-             -> (String -> FilePath -> GenericPackageDescription -> IO a)
-             -> IO [a]
-withPackages hackageDir f = do
+withPackages' :: (FilePath -> String -> (FilePath -> GenericPackageDescription -> IO a) -> IO r)
+              -> FilePath
+              -> (FilePath -> GenericPackageDescription -> IO a)
+              -> IO [r]
+withPackages' h hackageDir f = do
     packageNames <- getVisibleDirectoryContents hackageDir
-    mapM (\name -> withPackage hackageDir name (f name)) packageNames
+    mapM (\name -> h hackageDir name f) packageNames
+
+withPackages1 = withPackages' withPackage1
+withPackages = withPackages' withPackage
 
 -- Runs an action with a description of the package
-withPackage :: FilePath -> String
-            -> (FilePath -> GenericPackageDescription -> IO a)
-            -> IO a
-withPackage hackageDir packageName f = do
+withPackage1 :: FilePath -> String
+             -> (FilePath -> GenericPackageDescription -> IO a)
+             -> IO a
+withPackage1 hackageDir packageName f = do
     packageDir <- findLatestPackageDir hackageDir packageName
     pkgd <- readPackageDir packageDir packageName
     f packageDir pkgd
+
+-- Handles the case where there are multiple versions
+withPackage :: FilePath -> String
+            -> (FilePath -> GenericPackageDescription -> IO a)
+            -> IO (String, [a])
+withPackage hackageDir packageName f = do
+    packageDirs <- findAllPackageDirs hackageDir packageName
+    r <- mapM (\d -> readPackageDir d packageName >>= f d) packageDirs
+    return (packageName, r)
 
 -- Runs an action for each visible module in a package.
 forModules :: FilePath -> GenericPackageDescription
@@ -158,7 +172,8 @@ findAllPackageDirs :: FilePath -> String -> IO [FilePath]
 findAllPackageDirs hackageDir packageName = do
     let versionsDir = hackageDir </> packageName
     versions <- getVisibleDirectoryContents versionsDir
-    return $ map (\v -> versionsDir </> v </> packageName ++ "-" ++ v) versions
+    -- XXX assumes that no new directory is created
+    return $ map (\v -> versionsDir </> v) versions
 
 -- | Reads the Cabal package file out of a package directory.
 readPackageDir :: FilePath -> String -> IO GenericPackageDescription
@@ -213,7 +228,7 @@ runCollisions args = do
 
 findIdentifiers :: FilePath -> String -> IO [SetMap Name Syntax.ModuleName]
 findIdentifiers hackageDir packageName =
-    withPackage hackageDir packageName $ \packageDir pkgd ->
+    withPackage1 hackageDir packageName $ \packageDir pkgd ->
         forModules packageDir pkgd $ \m ->
             evaluate (modulePublicIdentifiers m)
 
@@ -236,6 +251,9 @@ modulePublicIdentifiers (Module _ m _ _ (Just exports) _ _) = foldMap handleExpo
 -- identifiers are exported
 modulePublicIdentifiers _ = mempty
 
+unPackageName (PackageName s) = s
+getPackageName pkgd = unPackageName (pkgName (package (packageDescription pkgd)))
+
 --------
 -- Tools
 
@@ -243,7 +261,8 @@ tools = Tools { argDir = def &= dirFlags }
           &= help "Search Hackage for build tool usage"
 runTools args = do
     let hackageDir = argDir args
-    results <- withPackages hackageDir $ \packageName pkgDir pkgd -> do
+    results <- withPackages1 hackageDir $ \pkgDir pkgd -> do
+        let packageName = getPackageName pkgd
         let tools = packageBuildToolNames pkgd
         return $ foldMap (\(PackageName tool) -> setMapSingleton tool packageName) tools
     let bag = mconcat results
@@ -272,11 +291,26 @@ packageBuildToolNames pkgd = uncondTools ++ condLibraryTools
 -- Compatibility
 
 -- XXX watch out: you want easy to handle data first
+-- so that rapid iteration on visualization is possible
+
+
+-- package name, package dep, date, *versions (blob)*
 
 dependencies = Dependencies { argDir = def &= dirFlags }
             &= help "Analyze per-version dependencies"
 runDependencies args = do
     let hackageDir = argDir args
-    withPackages hackageDir $ \packageName pkgDir pkgd -> do
-        return ()
-    return ()
+    withPackages hackageDir $ \pkgDir pkgd -> do
+        let packageName = getPackageName pkgd
+        let packageVer = packageVersion pkgd
+        let deps = buildDepends (packageDescription pkgd)
+        -- XXX We're going to falsely assume that there is only one version
+        -- interval
+        forM_ deps $ \(Dependency dep ver) ->
+            case versionIntervals (toVersionIntervals ver) of
+              ((LowerBound lb _,rub):xs) -> do
+                when (not (null xs)) $ hPutStrLn stderr ("oops, too much data " ++ packageName ++ "-" ++ showVersion packageVer)
+                let ub = case rub of NoUpperBound -> Nothing
+                                     UpperBound x _ -> Just x
+                putStrLn $ packageName ++ "," ++ showVersion packageVer ++ "," ++ unPackageName dep ++ "," ++ showVersion lb ++ "," ++ maybe "" showVersion ub
+              [] -> hPutStrLn stderr ("oops, no data " ++ packageName ++ "-" ++ showVersion packageVer)
